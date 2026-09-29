@@ -120,46 +120,15 @@ button{border:0;border-radius:15px;min-height:62px;font-size:clamp(17px,4vw,22px
       : "完成形を見ながらそろえよう！";
   }
 
-  function moveIndex(i){
-    if(i<0 || i>=N || grid[i]===null) return false;
-
-    const blank=grid.indexOf(null);
-
-    // 退避マスが空なら、選んだ1枚を退避
-    if(reserve===null){
-      reserve=grid[i];
-      grid[i]=null;
-      render();
-      return true;
-    }
-
-    // 盤面に空白がある場合は、隣接ピースだけ空白へ移動
-    if(blank!==-1 && adjacent(i,blank)){
-      grid[blank]=grid[i];
-      grid[i]=null;
-      render();
-      return true;
-    }
-    return false;
+  function pointInRect(x,y,rect){
+    return x>=rect.left && x<=rect.right && y>=rect.top && y<=rect.bottom;
   }
 
-  function moveReserve(){
-    const blank=grid.indexOf(null);
-    if(reserve!==null && blank!==-1){
-      grid[blank]=reserve;
-      reserve=null;
-      render();
-      return true;
-    }
-    return false;
+  function getSlot(index){
+    return board.querySelector(`.slot[data-index="${index}"]`);
   }
 
-  function targetIndexFromEvent(e){
-    const slot=e.target.closest(".slot");
-    return slot ? Number(slot.dataset.index) : -1;
-  }
-
-  // スライド操作のみ。タップでは動かさない。
+  // ドラッグ操作のみ。タップでは絶対に動かさない。
   function startDrag(e, source){
     if(e.pointerType === "mouse" && e.button !== 0) return;
 
@@ -183,9 +152,12 @@ button{border:0;border-radius:15px;min-height:62px;font-size:clamp(17px,4vw,22px
       source, index, tile,
       x:e.clientX, y:e.clientY,
       dx:0, dy:0,
-      pointerId:e.pointerId
+      pointerId:e.pointerId,
+      moved:false
     };
+
     tile.classList.add("dragging");
+    try{ tile.setPointerCapture(e.pointerId); }catch(_e){}
   }
 
   board.addEventListener("pointerdown", e=>startDrag(e,"board"));
@@ -198,76 +170,99 @@ button{border:0;border-radius:15px;min-height:62px;font-size:clamp(17px,4vw,22px
     gesture.dx=e.clientX-gesture.x;
     gesture.dy=e.clientY-gesture.y;
 
-    if(gesture.source === "board"){
-      // 盤面ピースは縦横どちらか一方向だけ追従させる
-      if(Math.abs(gesture.dx) > Math.abs(gesture.dy)){
-        gesture.tile.style.transform=`translate3d(${gesture.dx}px,0,0)`;
-      }else{
-        gesture.tile.style.transform=`translate3d(0,${gesture.dy}px,0)`;
-      }
-    }else{
-      // 退避ピースは空白マスまで自由にドラッグできる
-      gesture.tile.style.transform=`translate3d(${gesture.dx}px,${gesture.dy}px,0)`;
+    if(Math.hypot(gesture.dx,gesture.dy)>=10){
+      gesture.moved=true;
     }
+
+    // 指にピースを追従させる。移動確定は指を離した時だけ。
+    gesture.tile.style.transform=`translate3d(${gesture.dx}px,${gesture.dy}px,0)`;
   }, {passive:false});
+
+  function cleanupDrag(g){
+    if(!g || !g.tile) return;
+    g.tile.classList.remove("dragging");
+    g.tile.style.transform="";
+    try{ g.tile.releasePointerCapture(g.pointerId); }catch(_e){}
+  }
 
   function finishDrag(e){
     if(!gesture || e.pointerId!==gesture.pointerId) return;
+
     const g=gesture;
     gesture=null;
+    cleanupDrag(g);
 
-    if(g.tile){
-      g.tile.classList.remove("dragging");
-      g.tile.style.transform="";
-    }
+    // ここが重要：タップや小さな指ブレでは何も起こさない。
+    if(!g.moved || Math.hypot(g.dx,g.dy)<18) return;
 
+    const endX=e.clientX;
+    const endY=e.clientY;
     const blank=grid.indexOf(null);
-    if(blank===-1) return;
 
     if(g.source === "board"){
-      // 小さな指ブレでは動かさない
-      if(Math.hypot(g.dx,g.dy)<14) return;
-
-      let dest=g.index;
-      if(Math.abs(g.dx)>Math.abs(g.dy)){
-        const row=Math.floor(g.index/COLS);
-        const col=g.index%COLS;
-        if(g.dx>0 && col<COLS-1) dest=g.index+1;
-        if(g.dx<0 && col>0) dest=g.index-1;
-      }else{
-        const row=Math.floor(g.index/COLS);
-        if(g.dy>0 && row<ROWS-1) dest=g.index+COLS;
-        if(g.dy<0 && row>0) dest=g.index-COLS;
+      // 1) 退避マスが空なら、そこまで実際にドラッグした時だけ退避する。
+      if(reserve===null){
+        const rr=retreat.getBoundingClientRect();
+        if(pointInRect(endX,endY,rr)){
+          reserve=grid[g.index];
+          grid[g.index]=null;
+          render();
+          return;
+        }
       }
 
-      if(dest===blank && adjacent(g.index,blank)){
-        grid[blank]=grid[g.index];
-        grid[g.index]=null;
-        render();
+      // 2) 盤面の空白へは、隣接ピースだけ移動可能。
+      if(blank!==-1 && adjacent(g.index,blank)){
+        const blankSlot=getSlot(blank);
+        if(!blankSlot) return;
+        const br=blankSlot.getBoundingClientRect();
+
+        // 空白マスまでドラッグした場合
+        let moveToBlank=pointInRect(endX,endY,br);
+
+        // スライド感を出すため、空白方向へ十分動かした場合も許可
+        if(!moveToBlank){
+          const sr=getSlot(g.index).getBoundingClientRect();
+          const fromR=Math.floor(g.index/COLS), fromC=g.index%COLS;
+          const toR=Math.floor(blank/COLS), toC=blank%COLS;
+          const needX=(toC-fromC)*sr.width*0.25;
+          const needY=(toR-fromR)*sr.height*0.25;
+
+          if(toC!==fromC){
+            moveToBlank = Math.sign(g.dx)===Math.sign(needX) && Math.abs(g.dx)>=Math.abs(needX) && Math.abs(g.dx)>Math.abs(g.dy);
+          }else{
+            moveToBlank = Math.sign(g.dy)===Math.sign(needY) && Math.abs(g.dy)>=Math.abs(needY) && Math.abs(g.dy)>=Math.abs(g.dx);
+          }
+        }
+
+        if(moveToBlank){
+          grid[blank]=grid[g.index];
+          grid[g.index]=null;
+          render();
+        }
       }
       return;
     }
 
-    // 退避マスのピースは、空白マスの上までドラッグして離すと戻る
-    const hit=document.elementFromPoint(e.clientX,e.clientY);
-    const slot=hit && hit.closest ? hit.closest(".slot") : null;
-    if(!slot) return;
-    const dest=Number(slot.dataset.index);
-    if(dest===blank && reserve!==null){
-      grid[blank]=reserve;
-      reserve=null;
-      render();
+    // 3) 退避マスのピースは、盤面の空白マスまでドラッグして離した時だけ戻す。
+    if(g.source === "retreat" && reserve!==null && blank!==-1){
+      const blankSlot=getSlot(blank);
+      if(!blankSlot) return;
+      const br=blankSlot.getBoundingClientRect();
+      if(pointInRect(endX,endY,br)){
+        grid[blank]=reserve;
+        reserve=null;
+        render();
+      }
     }
   }
 
   window.addEventListener("pointerup", finishDrag, {passive:false});
   window.addEventListener("pointercancel", e=>{
     if(!gesture || e.pointerId!==gesture.pointerId) return;
-    if(gesture.tile){
-      gesture.tile.classList.remove("dragging");
-      gesture.tile.style.transform="";
-    }
+    const g=gesture;
     gesture=null;
+    cleanupDrag(g);
   });
 
   function shuffle(){
